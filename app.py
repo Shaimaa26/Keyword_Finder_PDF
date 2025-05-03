@@ -1,70 +1,120 @@
-# Add just after reading Excel sheets
-total_pdfs = len(pdf_df)
-progress_bar = st.progress(0)
-processed_count = 0
-results = []
+import os
+import pandas as pd
+import PyPDF2
+import requests
+import streamlit as st
+from io import BytesIO
 
-for idx, row in pdf_df.iterrows():
-    url = str(row['Filename']).strip()
-    pdf_name = f"pdfs/pdf_{idx}.pdf"
+# Streamlit setup
+st.set_page_config(page_title="PDF Extraction Tool", layout="centered")
+st.title("🔍 PDF Extraction Tool")
 
+# --- Sample Excel Template ---
+def generate_sample_excel():
+    pdfs_data = pd.DataFrame({
+        'Filename': ['https://www.example.com/sample1.pdf', 'https://www.example.com/sample2.pdf']
+    })
+    keywords_data = pd.DataFrame({
+        'Keyword': ['voltage', 'current', 'temperature']
+    })
+
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        pdfs_data.to_excel(writer, sheet_name='PDFs', index=False)
+        keywords_data.to_excel(writer, sheet_name='Keywords', index=False)
+    output.seek(0)
+    return output
+
+# --- Download sample template ---
+st.markdown("### 📄 Download Template Excel File")
+st.download_button(
+    label="📥 Download Sample Template",
+    data=generate_sample_excel(),
+    file_name="sample_template.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+)
+
+# --- Upload Excel File ---
+excel_file = st.file_uploader("📂 Upload your Excel file", type=["xlsx"])
+
+if excel_file is not None:
     try:
-        response = requests.get(url)
-        if response.status_code == 200:
-            with open(pdf_name, 'wb') as f:
-                f.write(response.content)
-            st.success(f"✅ Downloaded: {url}")
+        pdf_df = pd.read_excel(excel_file, sheet_name="PDFs")
+        keywords_df = pd.read_excel(excel_file, sheet_name="Keywords")
+    except Exception as e:
+        st.error(f"❌ Error reading Excel: {e}")
+    else:
+        keywords = keywords_df['Keyword'].dropna().str.lower().tolist()
+        results = []
+
+        os.makedirs("pdfs", exist_ok=True)
+
+        total_pdfs = len(pdf_df)
+        processed_count = 0
+        progress_bar = st.progress(0)
+
+        with st.spinner("🔄 Processing PDFs..."):
+            for idx, row in pdf_df.iterrows():
+                url = str(row['Filename']).strip()
+                pdf_name = f"pdfs/pdf_{idx}.pdf"
+
+                try:
+                    response = requests.get(url)
+                    if response.status_code == 200:
+                        with open(pdf_name, 'wb') as f:
+                            f.write(response.content)
+                        st.success(f"✅ Downloaded: {url}")
+                    else:
+                        st.warning(f"⚠️ Failed to download: {url}")
+                        continue
+                except Exception as e:
+                    st.error(f"❌ Download error: {url} | {e}")
+                    continue
+
+                try:
+                    with open(pdf_name, 'rb') as file:
+                        reader = PyPDF2.PdfReader(file)
+                        text = ''
+                        for page in reader.pages:
+                            if page.extract_text():
+                                text += page.extract_text() + '\n'
+
+                    lines = text.split('\n')
+
+                    for line in lines:
+                        line_lower = line.lower()
+                        for keyword in keywords:
+                            if keyword in line_lower:
+                                start = line_lower.find(keyword)
+                                cleaned_line = (
+                                    line[:start] +
+                                    line[start + len(keyword):]
+                                ).strip()
+
+                                results.append({
+                                    'PDF Source': url,
+                                    'Keyword': keyword,
+                                    'Matched Line': line.strip(),
+                                    'Line Without Keyword': cleaned_line
+                                })
+                                break
+                except Exception as e:
+                    st.error(f"❌ PDF read error: {e}")
+
+                # Update progress
+                processed_count += 1
+                progress_bar.progress(processed_count / total_pdfs)
+                st.info(f"📈 Processed {processed_count}/{total_pdfs} PDFs")
+
+        # --- Output Results ---
+        if results:
+            output_df = pd.DataFrame(results)
+            st.dataframe(output_df)
+
+            output_file = "output_results.xlsx"
+            output_df.to_excel(output_file, index=False, engine='openpyxl')
+
+            with open(output_file, "rb") as f:
+                st.download_button("⬇️ Download Results", data=f, file_name="output_results.xlsx")
         else:
-            st.warning(f"⚠️ Failed to download: {url}")
-            continue
-    except Exception as e:
-        st.error(f"❌ Download error: {url} | {e}")
-        continue
-
-    try:
-        with open(pdf_name, 'rb') as file:
-            reader = PyPDF2.PdfReader(file)
-            text = ''
-            for page in reader.pages:
-                if page.extract_text():
-                    text += page.extract_text() + '\n'
-
-        lines = text.split('\n')
-
-        for line in lines:
-            line_lower = line.lower()
-            for keyword in keywords:
-                if keyword in line_lower:
-                    start = line_lower.find(keyword)
-                    cleaned_line = (
-                        line[:start] +
-                        line[start + len(keyword):]
-                    ).strip()
-
-                    results.append({
-                        'PDF Source': url,
-                        'Keyword': keyword,
-                        'Matched Line': line.strip(),
-                        'Line Without Keyword': cleaned_line
-                    })
-                    break
-    except Exception as e:
-        st.error(f"❌ PDF read error: {e}")
-
-    # Update progress
-    processed_count += 1
-    progress_bar.progress(processed_count / total_pdfs)
-    st.info(f"📈 Processed {processed_count}/{total_pdfs} PDFs")
-
-# --- Output results ---
-if results:
-    output_df = pd.DataFrame(results)
-    st.dataframe(output_df)
-
-    output_file = "output_results.xlsx"
-    output_df.to_excel(output_file, index=False, engine='openpyxl')
-
-    with open(output_file, "rb") as f:
-        st.download_button("⬇️ Download Results", data=f, file_name="output_results.xlsx")
-else:
-    st.info("ℹ️ No keyword matches found.")
+            st.info("ℹ️ No keyword matches found.")
